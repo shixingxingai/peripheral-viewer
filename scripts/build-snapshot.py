@@ -4,16 +4,20 @@
 数据来源：
   1. scripts/scan-devices.ps1 -> Get-PnpDevice / Get-PnpDeviceProperty（VID/PID、父设备、位置）
   2. hidapi（可选）-> 厂商名、产品名、序列号、usage page / usage
+  3. scripts/battery_probe.py（可选）-> 按 config/battery-probes.json 读取厂商电量
 
-原则：只读、不猜测。读不到的电量、DPI、回报率、RGB 状态一律留空，
-由前端显示「不可用」，绝不用模拟值填充。
+原则：只读、不猜测。只有探针校准完成（decode.status=calibrated）才写入电量；
+其余指标与未校准设备一律留空，由前端显示「不可用」，绝不用模拟值填充。
 
-用法：python scripts/build-snapshot.py
+用法：
+  python scripts/build-snapshot.py
+  python scripts/build-snapshot.py --no-battery   # 跳过 HID 电量探测（更快）
 输出：public/real-devices.json
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import re
@@ -21,6 +25,8 @@ import subprocess
 import sys
 from collections import defaultdict
 from pathlib import Path
+
+from device_category import classify, hid_signals
 
 ROOT = Path(__file__).resolve().parent.parent
 WORKSPACE = ROOT.parent
@@ -127,27 +133,6 @@ def group_key(row: dict) -> str:
     return row.get("instanceId", "unknown")
 
 
-def infer_category(names: list[str], classes: set[str]) -> str:
-    joined = " ".join(names).lower()
-    if "Keyboard" in classes or "keyboard" in joined or "键盘" in joined:
-        return "keyboard"
-    if "Mouse" in classes or "mouse" in joined or "鼠标" in joined:
-        return "mouse"
-    if "Monitor" in classes or "display" in joined or "显示器" in joined:
-        return "monitor"
-    if classes & {"Camera", "Image"} or "webcam" in joined or "摄像头" in joined:
-        return "webcam"
-    if "gamepad" in joined or "手柄" in joined:
-        return "gamepad"
-    if "microphone" in joined or "麦克风" in joined:
-        return "microphone"
-    if "speaker" in joined or "扬声器" in joined:
-        return "speaker"
-    if classes & {"AudioEndpoint", "MEDIA"} or "headset" in joined or "耳机" in joined:
-        return "headset"
-    return "other"
-
-
 def pick_name(names: list[str], fallback: str) -> str:
     blocked = ("标准", "generic", "unknown", "usb input device", "hid-compliant")
     for name in names:
@@ -178,7 +163,12 @@ def make_ports(category: str, connection_kind: str) -> list[dict]:
     return [{"id": kind, "label": "数据接口", "kind": kind, "status": "linked", "note": "按设备类别推断"}]
 
 
-def build_devices(rows: list[dict], hid_rows: list[dict]) -> list[dict]:
+def build_devices(
+    rows: list[dict],
+    hid_rows: list[dict],
+    battery_index: dict[tuple[str, str], dict] | None = None,
+) -> list[dict]:
+    battery_index = battery_index or {}
     groups: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         if is_peripheral_row(row):
@@ -194,13 +184,16 @@ def build_devices(rows: list[dict], hid_rows: list[dict]) -> list[dict]:
 
     for key, items in groups.items():
         vid, pid, interface = parse_ids(items[0].get("instanceId", ""))
+        # 厂商探针按 (VID, PID) 命中；未命中时保持 None，交前端显示「不可用」。
+        probe = battery_index.get((f"{vid:04X}", f"{pid:04X}"))
         hid_items = hid_by_key.get(key, [])
         classes = {row.get("class", "") for row in items}
         names = [row.get("busDesc") or "" for row in items]
         names += [row.get("name") or "" for row in items]
         names += [str(item.get("product_string") or "") for item in hid_items]
 
-        category = infer_category(names, classes)
+        # 组合接收器会同时有键盘/鼠标集合，按 HID 集合数量与主接口用途区分。
+        category = classify(classes, names, hid_signals(hid_items))
         name = pick_name(names, items[0].get("name", ""))
         vendor = pick_vendor(
             [str(item.get("manufacturer_string") or "") for item in hid_items]
@@ -247,8 +240,9 @@ def build_devices(rows: list[dict], hid_rows: list[dict]) -> list[dict]:
                 "category": category,
                 "connection": {"kind": connection_kind, "protocol": protocol},
                 "status": status,
-                "battery": None,
-                "charging": False,
+                "battery": (probe or {}).get("battery"),
+                "charging": bool((probe or {}).get("charging")),
+                "batteryProbe": (probe or {}).get("probe"),
                 "firmware": None,
                 "location": location,
                 "interfaceNumber": interface,
@@ -375,25 +369,84 @@ def build_diagnostics(devices: list[dict], scanned_at: int) -> list[dict]:
                 }
             )
 
-    result.append(
-        {
-            "id": "diag-telemetry",
-            "severity": "info",
-            "scope": "system",
-            "title": "遥测数据不可用",
-            "detail": "电量、DPI、回报率等需要厂商私有协议支持，当前扫描未读取这些值。",
-            "suggestion": "接入 HID++ / OpenRGB 等协议适配器后，相应指标会自动显示。",
-            "createdAt": scanned_at,
-        }
-    )
+    probed = [device for device in devices if device.get("batteryProbe")]
+    pending = [
+        device for device in probed
+        if device["batteryProbe"].get("status") == "uncalibrated"
+    ]
+    calibrated = [
+        device for device in probed
+        if device["batteryProbe"].get("status") == "calibrated"
+    ]
+
+    if pending:
+        vendors = "、".join(sorted({device["batteryProbe"]["vendor"] for device in pending}))
+        result.append(
+            {
+                "id": "diag-battery-uncalibrated",
+                "severity": "info",
+                "scope": "system",
+                "title": "电量通道已识别，待校准",
+                "detail": f"{len(pending)} 台设备（{vendors}）的厂商私有电量通道已识别，但协议尚未校准，因此暂不显示电量。",
+                "suggestion": "运行 python scripts/battery_probe.py --capture --reference <厂商驱动显示的电量> 采样，"
+                              "换电量后再采一次并用 --suggest 生成解码建议。",
+                "createdAt": scanned_at,
+            }
+        )
+
+    if not calibrated:
+        result.append(
+            {
+                "id": "diag-telemetry",
+                "severity": "info",
+                "scope": "system",
+                "title": "遥测数据不可用",
+                "detail": "电量、DPI、回报率等需要厂商私有协议支持；当前扫描未读取或尚未校准这些值。",
+                "suggestion": "接入 HID++ / OpenRGB 等协议适配器并完成校准后，相应指标会自动显示。",
+                "createdAt": scanned_at,
+            }
+        )
     return result
 
 
+def probe_batteries() -> dict[tuple[str, str], dict]:
+    """调用配置驱动的厂商电量探针；任何异常都降级为空索引，绝不阻断主扫描。"""
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        import battery_probe  # noqa: PLC0415
+
+        report = battery_probe.probe_all()
+        index = battery_probe.battery_by_device(report)
+        ready = sum(1 for item in report["results"] if item["battery"] is not None)
+        print(
+            f"battery probes: {len(report['results'])} configured, {ready} calibrated, "
+            f"hidapi={'yes' if report['hidapiAvailable'] else 'no'}"
+        )
+        for item in report["results"]:
+            print(f"  {item['vendor']:<6} {item['status']:<12} battery={item['battery']}")
+        return index
+    except Exception as exc:  # noqa: BLE001
+        print(f"battery probes skipped: {exc}")
+        return {}
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="生成本机外设快照（只读）")
+    parser.add_argument(
+        "--no-battery",
+        action="store_true",
+        help="跳过厂商电量探测，只做 PnP + hidapi 基础扫描",
+    )
+    return parser.parse_args()
+
+
 def main() -> int:
+    args = parse_args()
     rows = run_scan()
     hid_rows = read_hid()
+    battery_index = {} if args.no_battery else probe_batteries()
     now_ms = int(__import__("time").time() * 1000)
-    devices = build_devices(rows, hid_rows)
+    devices = build_devices(rows, hid_rows, battery_index)
     for device in devices:
         device.pop("_parent", None)
         device.pop("_classRank", None)

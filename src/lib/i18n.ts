@@ -20,7 +20,7 @@ const zh = {
   app: {
     name: '外设视界',
     tagline: 'PERIPHERY',
-    version: 'v0.1.0 MVP',
+    version: 'v0.2.0 MVP',
   },
   nav: {
     workspace: '工作台',
@@ -140,6 +140,7 @@ const zh = {
     unidentified: '无法唯一识别',
     noSerial: '无序列号，使用厂商 + 位置指纹识别',
     noBattery: '无电池',
+    batteryPending: '待校准',
     signalQuality: '信号质量',
     receiver: '接收器',
     protocol: '连接协议',
@@ -522,6 +523,7 @@ const zh = {
     live: '实时',
     historyHint: '历史曲线与采样详情见「实时遥测」。',
     batteryEstimate: '电池电量',
+    batteryProbePending: '已识别 {{vendor}} 的私有电量通道，协议尚未校准，暂不显示电量。',
     capabilityCount: '{{count}} 项能力',
     noPorts: '未读取到接口信息',
     connectedSince: '首次发现',
@@ -551,7 +553,7 @@ const en = {
   app: {
     name: 'Periphery',
     tagline: 'PERIPHERY',
-    version: 'v0.1.0 MVP',
+    version: 'v0.2.0 MVP',
   },
   nav: {
     workspace: 'Workspace',
@@ -672,6 +674,7 @@ const en = {
     unidentified: 'Not uniquely identified',
     noSerial: 'No serial; identified by vendor + location fingerprint',
     noBattery: 'No battery',
+    batteryPending: 'Pending calibration',
     signalQuality: 'Signal quality',
     receiver: 'Receiver',
     protocol: 'Protocol',
@@ -1061,6 +1064,8 @@ const en = {
     live: 'Live',
     historyHint: 'See “Live telemetry” for history and sampling details.',
     batteryEstimate: 'Battery',
+    batteryProbePending:
+      'Detected {{vendor}} vendor battery channel, but the protocol is not calibrated yet, so no value is shown.',
     capabilityCount: '{{count}} capabilities',
     noPorts: 'No port information',
     connectedSince: 'First seen',

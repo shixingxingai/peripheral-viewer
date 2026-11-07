@@ -325,7 +325,11 @@ export function DeviceDrawer() {
                   ) : (
                     <MetricTile
                       label={t('connection.battery')}
-                      value={t('connection.noBattery')}
+                      value={
+                        device.batteryProbe?.status === 'uncalibrated'
+                          ? t('connection.batteryPending')
+                          : t('connection.noBattery')
+                      }
                       icon={BatteryCharging}
                     />
                   )}
@@ -337,7 +341,9 @@ export function DeviceDrawer() {
                 {metrics.length === 0 &&
                 (device.battery === null || device.battery === undefined) ? (
                   <div className="rounded-lg border border-white/[0.05] bg-white/[0.016] p-3 text-[10px] text-ink-faint">
-                    {t('common.unavailable')}
+                    {device.batteryProbe?.status === 'uncalibrated'
+                      ? t('drawer.batteryProbePending', { vendor: device.batteryProbe.vendor })
+                      : (device.batteryProbe?.reason ?? t('common.unavailable'))}
                   </div>
                 ) : null}
 

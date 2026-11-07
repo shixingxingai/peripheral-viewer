@@ -1,6 +1,6 @@
 [package]
 name = "peripheral-viewer"
-version = "0.1.0"
+version = "0.2.0"
 description = "外设视界 · 电脑外设 3D 可视化查看器"
 edition = "2021"
 rust-version = "1.77.2"
@@ -20,6 +20,11 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 sha2 = "0.10"
+# 厂商电量探针：与浏览器端 scripts/battery_probe.py 使用同一个 hidapi C 后端，
+# 读取同一份 config/battery-probes.json，解码规则完全由配置驱动。
+# 注意：Windows 下必须走 bundled C 后端（不要启用 windows-native），
+# 因为只有 C 后端的 hid_get_input_report 支持按 Report ID 只读取回当前报告。
+hidapi = { version = "2", default-features = false }
 
-# 平台适配层当前只依赖 Windows 自带的 PowerShell / PnP 接口，用户态只读、无需内核驱动。
-# 后续按方案接入 hidapi / rusb / btleplug 时，在此按 feature 增加依赖即可，UI 层无需改动。
+# 平台适配层依赖 Windows 自带的 PowerShell / PnP 接口与 hidapi，用户态只读、无需内核驱动。
+# 后续按方案接入 rusb / btleplug 时，在此按 feature 增加依赖即可，UI 层无需改动。

@@ -1,3 +1,4 @@
+mod battery;
 mod device;
 mod diagnosis;
 mod layout_store;

@@ -1,9 +1,10 @@
+use super::hid::{usage_index, HidSignals};
 use super::*;
 use anyhow::Context;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs,
     io::Read,
     path::Path,
@@ -280,7 +281,12 @@ fn has_class(rows: &[PnpRow], classes: &[&str]) -> bool {
     rows.iter().any(|row| classes.contains(&row.class.as_str()))
 }
 
-fn infer_category(rows: &[PnpRow]) -> &'static str {
+/// 判定设备类别：优先用 HID 用途信号区分组合接收器的键盘/鼠标，
+/// 信号不足时才退回 PnP class 与名称关键词。
+fn infer_category(rows: &[PnpRow], signals: Option<&HidSignals>) -> &'static str {
+    if let Some(category) = signals.and_then(HidSignals::category) {
+        return category;
+    }
     let text = combined_text(rows);
     if has_class(rows, &["Keyboard"]) || contains_any(&text, &["keyboard", "键盘"]) {
         "keyboard"
@@ -418,10 +424,19 @@ fn build_ports(category: &str, connection_kind: &str) -> Vec<DevicePort> {
 }
 
 /// 将一个分组映射为设备快照；空组返回 None，由上层跳过。
-fn map_group(group: &[PnpRow], now: i64) -> Option<DeviceSnapshot> {
+///
+/// `battery` 由配置驱动的厂商探针提供：命中时填入电量与来源信息，
+/// 未命中或未校准时保持 `None`，不会用猜测值填充。
+fn map_group(
+    group: &[PnpRow],
+    now: i64,
+    battery: &HashMap<(u16, u16), crate::battery::BatteryReading>,
+    usages: &HashMap<(u16, u16), HidSignals>,
+) -> Option<DeviceSnapshot> {
     let primary = group.first()?;
     let ids = parse_ids(&primary.instance_id);
-    let category = infer_category(group);
+    let reading = battery.get(&(ids.vendor_id, ids.product_id));
+    let category = infer_category(group, usages.get(&(ids.vendor_id, ids.product_id)));
     let name = infer_name(group);
     let location = group.iter().find_map(|row| row.location.clone());
     let (kind, protocol) = infer_connection(group, category, &name);
@@ -444,8 +459,9 @@ fn map_group(group: &[PnpRow], now: i64) -> Option<DeviceSnapshot> {
             signal_quality: None,
         },
         status: infer_status(group).to_string(),
-        battery: None,
-        charging: false,
+        battery: reading.and_then(|item| item.battery),
+        charging: reading.and_then(|item| item.charging).unwrap_or(false),
+        battery_probe: reading.map(|item| item.probe.clone()),
         firmware: None,
         location: location.clone(),
         interface_number: ids.interface,
@@ -468,12 +484,58 @@ fn build_devices(rows: Vec<PnpRow>) -> Vec<DeviceSnapshot> {
         return Vec::new();
     }
     let now = now_ms();
+    // 厂商电量探针走配置驱动的只读 HID 调用；结果按 (VID, PID) 索引后逐设备填充。
+    let battery = crate::battery::probe_all();
+    // HID 用途索引：组合接收器靠它区分主功能是键盘还是鼠标。
+    let usages = usage_index();
     let mut devices: Vec<DeviceSnapshot> = group_rows(filter_rows(rows))
         .into_values()
         .filter(|group| !group.is_empty())
-        .filter_map(|group| map_group(&group, now))
+        .filter_map(|group| map_group(&group, now, &battery, &usages))
         .collect();
 
     devices.sort_by(|a, b| a.category.cmp(&b.category).then(a.name.cmp(&b.name)));
     devices
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(class: &str, name: &str) -> PnpRow {
+        PnpRow {
+            class: class.to_string(),
+            name: name.to_string(),
+            instance_id: String::new(),
+            status: "OK".to_string(),
+            manufacturer: String::new(),
+            bus_desc: None,
+            location: None,
+            driver: None,
+        }
+    }
+
+    /// 组合接收器：没有 HID 信号时沿用既有「键盘优先」规则，有信号则按主接口修正。
+    #[test]
+    fn combo_group_is_disambiguated_by_hid_signals() {
+        let rows = vec![
+            row("Mouse", "HID-compliant mouse"),
+            row("Keyboard", "HID Keyboard Device"),
+        ];
+        assert_eq!(infer_category(&rows, None), "keyboard");
+
+        let mouse_primary = HidSignals {
+            keyboard: 1,
+            mouse: 1,
+            primary_usage: Some(0x0002),
+            primary_interface: Some(0),
+        };
+        assert_eq!(infer_category(&rows, Some(&mouse_primary)), "mouse");
+    }
+
+    #[test]
+    fn plain_devices_keep_text_fallback() {
+        assert_eq!(infer_category(&[row("Monitor", "Mi Monitor")], None), "monitor");
+        assert_eq!(infer_category(&[row("USB", "AURA LED Controller")], None), "other");
+    }
 }

@@ -1,7 +1,7 @@
 {
   "name": "peripheral-viewer",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "外设视界 · 电脑外设 3D 可视化查看器",
   "type": "module",
   "scripts": {
@@ -10,6 +10,10 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "scan:devices": "python scripts/build-snapshot.py",
+    "scan:battery": "python scripts/battery_probe.py --probe --verbose",
+    "battery:capture": "python scripts/battery_probe.py --capture",
+    "battery:suggest": "python scripts/battery_probe.py --suggest",
+    "test:probe": "python -m unittest discover -s scripts -p \"test_*.py\"",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "format": "biome format --write .",

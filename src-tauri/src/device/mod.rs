@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
 
+use crate::battery::BatteryProbeInfo;
+
+#[cfg(target_os = "windows")]
+mod hid;
 #[cfg(target_os = "windows")]
 mod windows;
 #[cfg(target_os = "windows")]
@@ -132,6 +136,9 @@ pub struct DeviceSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub battery: Option<u8>,
     pub charging: bool,
+    /// 电量数据来源与校准状态；None 表示没有匹配到厂商探针。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub battery_probe: Option<BatteryProbeInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub firmware: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

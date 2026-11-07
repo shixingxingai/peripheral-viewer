@@ -488,7 +488,7 @@ export function SettingsPage() {
             <div className="mt-3 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
               <div className="rounded-lg border border-white/[0.05] bg-white/[0.014] px-2.5 py-2">
                 <p className="text-[8.5px] text-ink-faint">{t('settings.about.version')}</p>
-                <p className="mt-0.5 font-mono text-[10px] text-ink-muted">0.1.0 · MVP</p>
+                <p className="mt-0.5 font-mono text-[10px] text-ink-muted">0.2.0 · MVP</p>
               </div>
               <div className="rounded-lg border border-white/[0.05] bg-white/[0.014] px-2.5 py-2">
                 <p className="text-[8.5px] text-ink-faint">{t('settings.about.stack')}</p>
@@ -642,7 +642,7 @@ export function SettingsPage() {
           <div className="flex items-center justify-between px-1 font-mono text-[8px] uppercase tracking-[0.12em] text-ink-faint/40">
             <span className="flex items-center gap-1">
               <HardDrive className="h-2.5 w-2.5" />
-              PERIPHERY · 0.1.0
+              PERIPHERY · 0.2.0
             </span>
             <span className="flex items-center gap-1">
               <TriangleAlert className="h-2.5 w-2.5" />

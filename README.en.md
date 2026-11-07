@@ -6,7 +6,7 @@ A Windows desktop viewer for **computer peripherals**: it turns the devices actu
 
 The UI is built around a replaceable data source, so the same screens can display **real hardware scans**, be driven by a **Rust backend in the desktop app**, or fall back to **demo data** when no devices are available.
 
-> Current version: `0.1.0`. All six pages, real device scanning, the Tauri desktop app and its installer are runnable. Vendor-specific telemetry, a precise glTF asset library and SQLite persistence are still on the roadmap — see [Known limitations](#known-limitations-and-roadmap).
+> Current version: `0.2.0`. All six pages, real device scanning, the Tauri desktop app and its installer are runnable. Vendor-specific telemetry, a precise glTF asset library and SQLite persistence are still on the roadmap — see [Known limitations](#known-limitations-and-roadmap).
 
 ## Features
 
@@ -117,11 +117,66 @@ npm run tauri -- build --bundles nsis
 ```bash
 npm run lint        # Biome
 npm run typecheck   # tsc --noEmit
-npm test            # Vitest
+npm test            # Vitest (frontend)
+npm run test:probe  # probe rule unit tests (Python unittest)
 npm run build
 ```
 
-Current status: 0 lint errors, 0 type errors, 20 passing tests, production build passing.
+Current status: 0 lint errors, 0 type errors, 20 frontend tests + 17 probe tests passing, production build passing.
+
+## Vendor battery probes
+
+Battery level on 2.4 GHz peripherals travels over a vendor-private HID report. Windows' standard HID / PnP layer never sees it (no `0x85` Battery System Page, no battery-class device). This project handles that with **config-driven probes** instead of hard-coding one vendor's protocol:
+
+- Config: `config/battery-probes.json` — the single maintenance entry point
+- Engines: `scripts/battery_probe.py` (browser snapshot + calibration tooling), `src-tauri/src/battery.rs` (desktop)
+- Both read **the same config**, so matching and decoding stay identical. Rust embeds it with `include_str!` at compile time, so rebuild the desktop app after editing.
+
+### Two read strategies
+
+| `transport.kind` | When it applies | Behaviour |
+|---|---|---|
+| `input-report` | Descriptor exposes only Input (e.g. Dareu 260D:1092) | Read-only `HidD_GetInputReport` per Report ID; never writes |
+| `output-query` | Input and Output come in pairs (e.g. Rapoo 24AE:185A) | Sends the configured vendor query first, then reads the response; writes are off by default |
+
+### Currently mapped
+
+| Vendor | VID:PID | Strategy | Status |
+|---|---|---|---|
+| Dareu | `260D:1092` | `input-report`, Report ID 4 / 5, 24 bytes | Channel detected, **pending calibration** |
+| Rapoo | `24AE:185A` | `output-query`, Report ID 0xBA / 0xBB / 0xBC | **Calibrated** (single sample): Report 0xBC / 0xBB, offset 5, scale 1 |
+
+"Pending calibration" does not mean unavailable: raw bytes are already read reliably, only the "which byte is the level" step is missing. The UI says so instead of inventing a percentage.
+
+Rapoo evidence: with the vendor driver reporting 48%, the raw report was `b0 42 80 0c 01 30` and the last byte `0x30` is 48; when the level rose to 54% and 56% that byte became `0x36` and `0x38`, with both collections agreeing. Capture once more at a clearly different level to upgrade `confidence` from `single-sample` to `multi-sample`.
+
+### Adding a vendor
+
+1. Run `npm run scan:battery` to inspect HID interfaces, Usage Page and Report IDs.
+2. Append an entry to `probes` in `config/battery-probes.json`: fill `match` (VID / PID / usagePage / usage) and `transport` (strategy, Report IDs, lengths), and set `decode.status` to `uncalibrated`.
+3. Run `python scripts/battery_probe.py --validate`.
+4. Calibrate and fill in `percentOffset`.
+
+**No code changes required.** Only a genuinely new transport (for example BLE GATT) needs a new `transport.kind`.
+
+### Calibrating
+
+```bash
+# Sample while the vendor driver shows X%
+npm run battery:capture -- --reference 87 --label "vendor app shows 87%"
+# Sample again after the level changes
+npm run battery:capture -- --reference 63
+# Get candidate byte offsets
+npm run battery:suggest
+```
+
+`--suggest` prints candidate `percentOffset` / `percentScale`; put them into the probe's `decode` and switch `status` to `calibrated`. **Verify with a third level** before trusting a two-point fit.
+
+### Safety and honesty rules
+
+- **Read-only by default**: `defaults.allowDeviceWrites` is `false`; writes additionally require `--allow-write` on the command line and `transport.query.status=calibrated` — three independent gates.
+- Uncalibrated, out-of-range, length-mismatched or failed reads always return "unavailable"; never a guessed or default value.
+- Each HID read runs in its own subprocess with a hard timeout, so a blocking hidapi call cannot stall the whole scan.
 
 ## Maintenance notes
 
@@ -129,11 +184,13 @@ Current status: 0 lint errors, 0 type errors, 20 passing tests, production build
 - **The CSP must allow Tauri IPC.** `connect-src` in `tauri.conf.json` includes `ipc:` and `http://ipc.localhost`. Without them, commands such as `list_devices` are blocked by the browser: the UI renders but no device data arrives.
 - **One collector, two consumers.** Rust embeds the same PowerShell script with `include_str!("../../../scripts/scan-devices.ps1")` that the Python snapshot generator uses; changes affect both sides.
 - **Command contract.** The invokes in `src/lib/backend/tauri.ts` map one-to-one onto the commands in `src-tauri/src/lib.rs`; update both together.
+- **Device category is not just the PnP class.** Combo 2.4G receivers enumerate both keyboard and mouse collections, so "has a Keyboard class → keyboard" misclassifies gaming mice (Rapoo 24AE:185A is exactly that). `scripts/device_category.py` and `src-tauri/src/device/hid.rs` decide by HID generic-desktop collection counts first, then by the usage of the lowest-numbered (primary) interface, and only fall back to name keywords when hidapi is unavailable. Keep both implementations in sync.
 
 ## Known limitations and roadmap
 
 - Discovery relies on user-mode, read-only PnP interfaces — **no kernel driver**. Hot-plug detection uses polling diffs rather than `CM_Register_Notification`.
-- Vendor protocols (HID++ / OpenRGB), real telemetry sampling, a precise glTF model library and device catalogue, and SQLite persistence/migrations are not implemented. 3D models are parametric models built per device category.
+- Vendor protocols: a config-driven battery-probe framework exists; Rapoo's level is already calibrated while Dareu's private channel is detected but **not calibrated yet**. HID++ / OpenRGB and other protocols, real telemetry sampling, a precise glTF model library and device catalogue, and SQLite persistence/migrations are still unimplemented. 3D models are parametric models built per device category.
+- Device categories rely on HID usage signals; without hidapi (Python `hidapi` module missing) combo receivers fall back to the keyboard-first name heuristic and may be misclassified again.
 - The desktop build is not code-signed and has no auto-update or crash reporting.
 - `elkjs` is ~1.44 MB and only loads when the topology page opens, but Vite still reports a chunk-size warning.
 - Demo-mode topology uses a fixed device list, so devices created by simulated hot-plug do not appear in the graph.

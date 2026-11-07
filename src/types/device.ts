@@ -58,6 +58,14 @@ export interface DeviceTelemetry {
   latency?: number | null
 }
 
+/** 厂商电量探针的匹配与校准状态，来自 config/battery-probes.json。 */
+export interface BatteryProbeInfo {
+  probeId: string
+  vendor: string
+  status: 'calibrated' | 'uncalibrated' | 'disabled' | 'error' | 'no-match'
+  reason?: string | null
+}
+
 export interface DeviceSnapshot {
   id: string
   modelId?: string | null
@@ -71,6 +79,7 @@ export interface DeviceSnapshot {
   status: DeviceStatus
   battery?: number | null
   charging?: boolean
+  batteryProbe?: BatteryProbeInfo | null
   firmware?: string | null
   location?: string | null
   interfaceNumber?: number | null
