@@ -1,0 +1,25 @@
+[package]
+name = "peripheral-viewer"
+version = "0.1.0"
+description = "外设视界 · 电脑外设 3D 可视化查看器"
+edition = "2021"
+rust-version = "1.77.2"
+
+[lib]
+name = "peripheral_viewer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+sha2 = "0.10"
+
+# 平台适配层当前只依赖 Windows 自带的 PowerShell / PnP 接口，用户态只读、无需内核驱动。
+# 后续按方案接入 hidapi / rusb / btleplug 时，在此按 feature 增加依赖即可，UI 层无需改动。

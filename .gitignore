@@ -1,0 +1,15 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+src-tauri/target
+src-tauri/gen
+dist-desktop
+public/real-devices.json
+coverage
+playwright-report
+test-results
+*.log
+# 本地截图 / 临时反馈文件，不纳入版本控制
+/QQ*.png

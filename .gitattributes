@@ -1,0 +1,10 @@
+# 统一使用 LF，避免 Windows CRLF 触发 Biome 格式差异
+* text=auto eol=lf
+
+# 二进制资产不做换行转换
+*.png binary
+*.ico binary
+*.icns binary
+*.dll binary
+*.exe binary
+*.woff2 binary
