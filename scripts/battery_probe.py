@@ -34,6 +34,13 @@ CONFIG_PATH = ROOT / "config" / "battery-probes.json"
 CAPTURE_DIR = ROOT.parent / "temp" / "battery-captures"
 WORKER_FLAG = "--_read-worker"
 
+# 用户校准覆盖层（L1）：与桌面端 src-tauri/src/battery/calibration.rs 使用同一路径、
+# 同一份 schema、同一套「只覆盖 decode」的合并规则。
+OVERLAY_SCHEMA_VERSION = 1
+
+# 未校准时的默认说明；配置里的 decode.unavailableReason 可覆盖它。
+UNCALIBRATED_REASON = "厂商协议尚未校准：未确认电量子节，按约定不显示猜测值"
+
 try:
     import hid  # type: ignore
 except ImportError:
@@ -186,6 +193,113 @@ def validate_config(cfg: Any) -> list[str]:
     return errors
 
 
+def overlay_path() -> Path:
+    """用户校准覆盖层位置，与 Rust 端 calibration::default_path() 保持一致。"""
+    appdata = os.environ.get("APPDATA")
+    if appdata and appdata.strip():
+        return Path(appdata) / "peripheral-viewer" / "battery-calibration.json"
+    import tempfile
+
+    return Path(tempfile.gettempdir()) / "peripheral-viewer" / "battery-calibration.json"
+
+
+def validate_overlay(overlay: Any, cfg: dict[str, Any]) -> list[str]:
+    """校验覆盖层。任何一条不合格都算整份无效（与桌面端策略一致）。"""
+    errors: list[str] = []
+    if not isinstance(overlay, dict):
+        return ["覆盖层根节点必须是对象"]
+    if overlay.get("schemaVersion") != OVERLAY_SCHEMA_VERSION:
+        errors.append(f"schemaVersion 必须为 {OVERLAY_SCHEMA_VERSION}")
+    entries = overlay.get("entries")
+    if not isinstance(entries, list):
+        return errors + ["entries 必须是数组"]
+
+    probes = {probe["id"]: probe for probe in cfg.get("probes", [])}
+    seen: set[str] = set()
+    for index, entry in enumerate(entries):
+        tag = f"entries[{index}]"
+        if not isinstance(entry, dict):
+            errors.append(f"{tag} 必须是对象")
+            continue
+        probe_id = entry.get("probeId")
+        if probe_id not in probes:
+            errors.append(f"{tag}: 未知探针 {probe_id!r}")
+            continue
+        if probe_id in seen:
+            errors.append(f"{tag}: 探针 {probe_id} 出现多条校准记录")
+        seen.add(probe_id)
+
+        probe = probes[probe_id]
+        transport = probe["transport"]
+        decode = entry.get("decode")
+        if not isinstance(decode, dict):
+            errors.append(f"{tag}.decode 必须是对象")
+            continue
+        status = decode.get("status")
+        if status not in ("calibrated", "uncalibrated", "disabled"):
+            errors.append(f"{tag}.decode.status 只能是 calibrated|uncalibrated|disabled")
+        report_id = decode.get("percentReportId")
+        if report_id not in transport["reportIds"]:
+            errors.append(f"{tag}: percentReportId={report_id} 不在 transport.reportIds 中")
+        offset = decode.get("percentOffset")
+        if offset is not None:
+            if not isinstance(offset, int) or not 0 <= offset <= 1023:
+                errors.append(f"{tag}.decode.percentOffset 必须是 0..1023 的整数或 null")
+            else:
+                declared = transport.get("reportLengths", {}).get(str(report_id))
+                if isinstance(declared, int) and offset >= declared:
+                    errors.append(
+                        f"{tag}: percentOffset={offset} 超出 Report {report_id} 的声明长度 {declared}"
+                    )
+        if status == "calibrated" and offset is None:
+            errors.append(f"{tag}: status=calibrated 时必须填写 percentOffset")
+        scale = decode.get("percentScale")
+        if not isinstance(scale, (int, float)) or scale <= 0 or scale > 100:
+            errors.append(f"{tag}: percentScale 必须是 (0, 100] 内的数")
+        rng = decode.get("percentRange")
+        if (
+            not isinstance(rng, list)
+            or len(rng) != 2
+            or not all(isinstance(item, (int, float)) for item in rng)
+            or rng[0] >= rng[1]
+        ):
+            errors.append(f"{tag}: percentRange 必须是 [min, max] 且 min < max")
+    return errors
+
+
+def read_overlay(
+    cfg: dict[str, Any], path: Path | None = None
+) -> tuple[dict[str, dict[str, Any]], str | None]:
+    """返回 ({probeId: entry}, 错误说明)。文件不存在属于正常情况。"""
+    target = path or overlay_path()
+    try:
+        raw = json.loads(target.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return {}, None
+    except (OSError, json.JSONDecodeError) as exc:
+        return {}, f"读取用户校准失败: {exc}"
+    errors = validate_overlay(raw, cfg)
+    if errors:
+        return {}, "用户校准无效: " + "；".join(errors)
+    return {entry["probeId"]: entry for entry in raw["entries"]}, None
+
+
+def effective_decode(
+    probe: dict[str, Any], entry: dict[str, Any] | None
+) -> tuple[dict[str, Any], str, str | None]:
+    """合并 L0 基线与 L1 覆盖层：覆盖层只改 decode，match / transport 永远用基线。"""
+    if not entry:
+        return dict(probe["decode"]), "bundled", None
+    decode = dict(entry["decode"])
+    if decode.get("status") == "calibrated":
+        # 已校准出电量后，基线的「该通道无电量」说明必须清掉，否则界面自相矛盾。
+        decode.pop("unavailableReason", None)
+    elif not decode.get("unavailableReason"):
+        decode["unavailableReason"] = probe["decode"].get("unavailableReason")
+    confidence = entry.get("confidence") or None
+    return decode, "user", confidence
+
+
 def normalize_interfaces() -> list[dict[str, Any]]:
     """枚举本机 HID 接口，只保留配置中可能出现的厂商自定义接口信息。"""
     if hid is None:
@@ -321,7 +435,10 @@ def decode(reports: dict[str, str], cfg: dict[str, Any]) -> dict[str, Any]:
             "battery": None,
             "charging": None,
             "status": "uncalibrated",
-            "reason": "厂商协议尚未校准：未确认电量子节，按约定不显示猜测值",
+            # 配置可用 unavailableReason 覆盖默认说明：有的通道确实不含电量字段，
+            # 与「待校准」不是一回事，界面必须如实区分。
+            "reason": cfg.get("unavailableReason") or UNCALIBRATED_REASON,
+            "channelAvailable": not bool(cfg.get("unavailableReason")),
         }
     rid = str(cfg["percentReportId"])
     raw = reports.get(rid)
@@ -355,14 +472,17 @@ def decode(reports: dict[str, str], cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def probe_all(cfg: dict[str, Any] | None = None, allow_write: bool = False,
-              verbose: bool = False) -> dict[str, Any]:
+              verbose: bool = False, overlay_file: Path | None = None) -> dict[str, Any]:
     cfg = cfg or load_config()
     timeout_ms = int(cfg["defaults"]["readTimeoutMs"])
     interfaces = normalize_interfaces()
+    overlay, overlay_error = read_overlay(cfg, overlay_file)
     results = []
     for probe in cfg["probes"]:
         started = time.monotonic()
         matched = [i for i in interfaces if matches(i, probe)] if hid else []
+        # 合并用户校准：只覆盖 decode，读取方式永远来自内置配置。
+        decode_cfg, calibrated_by, confidence = effective_decode(probe, overlay.get(probe["id"]))
         entry: dict[str, Any] = {
             "probeId": probe["id"],
             "vendor": probe["vendor"],
@@ -381,6 +501,8 @@ def probe_all(cfg: dict[str, Any] | None = None, allow_write: bool = False,
             "interfaces": [],
             "wrote": False,
             "durationMs": 0,
+            "calibratedBy": calibrated_by,
+            "confidence": confidence,
         }
         if not probe["enabled"]:
             entry["reason"] = "探针已在配置中禁用"
@@ -405,7 +527,7 @@ def probe_all(cfg: dict[str, Any] | None = None, allow_write: bool = False,
                 })
             entry["reports"] = all_reports
             entry["wrote"] = wrote_any
-            decoded = decode(all_reports, probe["decode"])
+            decoded = decode(all_reports, decode_cfg)
             entry.update(decoded)
             expected_ids = {str(x) for x in probe["transport"]["reportIds"]}
             missing_ids = sorted(expected_ids - set(all_reports.keys()))
@@ -425,6 +547,8 @@ def probe_all(cfg: dict[str, Any] | None = None, allow_write: bool = False,
         "generatedAt": int(time.time() * 1000),
         "hidapiAvailable": hid is not None,
         "allowDeviceWrites": allow_write and bool(cfg["defaults"].get("allowDeviceWrites")),
+        "overlayPath": str(overlay_file or overlay_path()),
+        "overlayError": overlay_error,
         "results": results,
     }
 
@@ -445,6 +569,10 @@ def battery_by_device(report: dict[str, Any]) -> dict[tuple[str, str], dict[str,
                     "vendor": item["vendor"],
                     "status": item["status"],
                     "reason": item.get("reason"),
+                    # false 表示通道本身不含电量字段，界面应显示「无法读取」而非「待校准」。
+                    "channelAvailable": item.get("channelAvailable", True),
+                    "confidence": item.get("confidence"),
+                    "calibratedBy": item.get("calibratedBy"),
                 },
             }
     return index
@@ -458,7 +586,9 @@ def print_human(report: dict[str, Any], verbose: bool = False) -> None:
         value = f"{item['battery']}%" if item["battery"] is not None else "不可用"
         print(f"[{item['vendor']:<6}] {item['probeId']}")
         print(f"  状态={item['status']:<12} 电量={value:<8} "
-              f"方式={item['transportKind']:<13} 耗时={item['durationMs']}ms")
+              f"方式={item['transportKind']:<13} 耗时={item['durationMs']}ms"
+              f"  校准={item.get('calibratedBy', '-')}"
+              + (f"/{item['confidence']}" if item.get("confidence") else ""))
         if item["reason"]:
             print(f"  说明: {item['reason']}")
         if verbose and item["reports"]:
@@ -475,7 +605,8 @@ def cmd_capture(args: argparse.Namespace, cfg: dict[str, Any]) -> int:
     if args.reference is None:
         print("--capture 需要 --reference，请填入此刻厂商驱动显示的真实电量百分比", file=sys.stderr)
         return 2
-    report = probe_all(cfg, allow_write=args.allow_write, verbose=True)
+    report = probe_all(cfg, allow_write=args.allow_write, verbose=True,
+                       overlay_file=args.overlay)
     CAPTURE_DIR.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     path = CAPTURE_DIR / f"capture-{stamp}.json"
@@ -628,6 +759,8 @@ def main() -> int:
     parser.add_argument("--allow-write", action="store_true",
                         help="显式授权发送厂商查询命令（仍需配置校准并开启 allowDeviceWrites）")
     parser.add_argument("--config", type=Path, default=CONFIG_PATH)
+    parser.add_argument("--overlay", type=Path, default=None,
+                        help="用户校准覆盖层路径（默认 %APPDATA%/peripheral-viewer/battery-calibration.json）")
     args = parser.parse_args()
 
     try:
@@ -641,6 +774,21 @@ def main() -> int:
         for probe in cfg["probes"]:
             print(f"  - {probe['vendor']:<6} {probe['id']}  "
                   f"transport={probe['transport']['kind']}  decode={probe['decode']['status']}")
+        overlay, overlay_error = read_overlay(cfg, args.overlay)
+        target = args.overlay or overlay_path()
+        if overlay_error:
+            print(f"用户校准无效（整份忽略）: {overlay_error}", file=sys.stderr)
+            print(f"  文件: {target}", file=sys.stderr)
+            return 1
+        if overlay:
+            print(f"用户校准: {len(overlay)} 条覆盖（{target}）")
+            for probe_id, entry in overlay.items():
+                decode = entry["decode"]
+                print(f"  - {probe_id}: status={decode['status']} "
+                      f"report={decode['percentReportId']} offset={decode['percentOffset']} "
+                      f"scale={decode['percentScale']} confidence={entry.get('confidence') or '-'}")
+        else:
+            print(f"用户校准: 无（{target} 不存在或为空）")
         return 0
 
     if args.list:
@@ -658,7 +806,8 @@ def main() -> int:
     if args.suggest:
         return cmd_suggest(args, cfg)
 
-    report = probe_all(cfg, allow_write=args.allow_write, verbose=args.verbose)
+    report = probe_all(cfg, allow_write=args.allow_write, verbose=args.verbose,
+                       overlay_file=args.overlay)
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2))
     else:

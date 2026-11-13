@@ -430,12 +430,14 @@ fn build_ports(category: &str, connection_kind: &str) -> Vec<DevicePort> {
 fn map_group(
     group: &[PnpRow],
     now: i64,
-    battery: &HashMap<(u16, u16), crate::battery::BatteryReading>,
+    battery: &crate::battery::BatteryIndex,
     usages: &HashMap<(u16, u16), HidSignals>,
 ) -> Option<DeviceSnapshot> {
     let primary = group.first()?;
     let ids = parse_ids(&primary.instance_id);
-    let reading = battery.get(&(ids.vendor_id, ids.product_id));
+    let serial = serial_hint(group);
+    // 序列号级校准优先于通用校准：同型号两台接收器可以各自校准。
+    let reading = battery.get(ids.vendor_id, ids.product_id, serial.as_deref());
     let category = infer_category(group, usages.get(&(ids.vendor_id, ids.product_id)));
     let name = infer_name(group);
     let location = group.iter().find_map(|row| row.location.clone());
@@ -447,7 +449,7 @@ fn map_group(
         manufacturer: infer_manufacturer(group),
         vendor_id: ids.vendor_id,
         product_id: ids.product_id,
-        serial: serial_hint(group),
+        serial,
         category: category.to_string(),
         connection: DeviceConnection {
             kind: kind.to_string(),

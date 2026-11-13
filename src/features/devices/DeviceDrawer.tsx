@@ -5,6 +5,7 @@ import {
   Box,
   Cpu,
   Crosshair,
+  FlaskConical,
   Gauge,
   Hash,
   Info,
@@ -29,6 +30,7 @@ import { DiagnosticCard } from '@/components/common/DiagnosticCard'
 import { InfoRow } from '@/components/common/InfoRow'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { CalibrationWizard } from '@/features/calibration/CalibrationWizard'
 import { useDiagnostics } from '@/hooks/useDeviceData'
 import { cn, formatRelativeTime, hexToRgba, shortId } from '@/lib/utils'
 import { useDeviceStore } from '@/stores/devices'
@@ -117,6 +119,7 @@ export function DeviceDrawer() {
   const diagnostics = useDiagnostics()
   const language = useSettingsStore((state) => state.language)
   const [tab, setTab] = useState<Tab>('overview')
+  const [calibrationOpen, setCalibrationOpen] = useState(false)
 
   useEffect(() => {
     // 切换设备后回到概览页，避免停留在上一个设备选中的标签
@@ -125,6 +128,15 @@ export function DeviceDrawer() {
   }, [selectedId])
 
   if (!device) return null
+
+  // 电量兜底文案分两档：通道可读但未校准 → 「待校准」；通道不含电量字段 → 「无法读取」。
+  const probe = device.batteryProbe
+  const batteryFallbackLabel =
+    probe?.status === 'uncalibrated'
+      ? probe.channelAvailable === false
+        ? t('connection.batteryUnavailable')
+        : t('connection.batteryPending')
+      : t('connection.noBattery')
 
   const deviceDiagnostics = (diagnostics.data ?? []).filter(
     (diagnosis) => diagnosis.deviceId === device.id,
@@ -325,11 +337,7 @@ export function DeviceDrawer() {
                   ) : (
                     <MetricTile
                       label={t('connection.battery')}
-                      value={
-                        device.batteryProbe?.status === 'uncalibrated'
-                          ? t('connection.batteryPending')
-                          : t('connection.noBattery')
-                      }
+                      value={batteryFallbackLabel}
                       icon={BatteryCharging}
                     />
                   )}
@@ -340,10 +348,22 @@ export function DeviceDrawer() {
 
                 {metrics.length === 0 &&
                 (device.battery === null || device.battery === undefined) ? (
-                  <div className="rounded-lg border border-white/[0.05] bg-white/[0.016] p-3 text-[10px] text-ink-faint">
-                    {device.batteryProbe?.status === 'uncalibrated'
-                      ? t('drawer.batteryProbePending', { vendor: device.batteryProbe.vendor })
-                      : (device.batteryProbe?.reason ?? t('common.unavailable'))}
+                  <div className="rounded-lg border border-white/[0.05] bg-white/[0.016] p-3 text-[10px] leading-relaxed text-ink-faint">
+                    {device.batteryProbe?.reason ??
+                      (device.batteryProbe
+                        ? t('drawer.batteryProbePending', { vendor: device.batteryProbe.vendor })
+                        : t('common.unavailable'))}
+                    {device.batteryProbe && device.batteryProbe.channelAvailable !== false ? (
+                      <Button
+                        variant="soft"
+                        size="xs"
+                        className="mt-2"
+                        icon={<FlaskConical className="h-3 w-3" />}
+                        onClick={() => setCalibrationOpen(true)}
+                      >
+                        {t('calibration.title')}
+                      </Button>
+                    ) : null}
                   </div>
                 ) : null}
 
@@ -621,6 +641,13 @@ export function DeviceDrawer() {
           </div>
         </DialogPrimitive.Content>
       </DialogPrimitive.Portal>
+
+      <CalibrationWizard
+        open={calibrationOpen}
+        onOpenChange={setCalibrationOpen}
+        initialProbeId={device.batteryProbe?.probeId ?? null}
+        serial={device.serial ?? null}
+      />
     </DialogPrimitive.Root>
   )
 }

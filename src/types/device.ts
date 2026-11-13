@@ -58,12 +58,18 @@ export interface DeviceTelemetry {
   latency?: number | null
 }
 
-/** 厂商电量探针的匹配与校准状态，来自 config/battery-probes.json。 */
+/** 厂商电量探针的匹配与校准状态，来自 config/battery-probes.json 与用户覆盖层。 */
 export interface BatteryProbeInfo {
   probeId: string
   vendor: string
   status: 'calibrated' | 'uncalibrated' | 'disabled' | 'error' | 'no-match'
   reason?: string | null
+  /** false 表示厂商通道本身不含电量字段：应显示「无法读取」而非「待校准」。 */
+  channelAvailable?: boolean
+  /** 校准置信度：只有多点验证过的映射才配叫「已验证」。 */
+  confidence?: CalibrationConfidence | null
+  /** 电量的校准来源：内置基线或用户校准。 */
+  calibratedBy?: 'bundled' | 'user' | null
 }
 
 export interface DeviceSnapshot {
@@ -192,6 +198,103 @@ export interface RealSnapshot {
   events: DeviceEventLog[]
 }
 
+/** 校准置信度：只有多点验证过的映射才配叫「已验证」。 */
+export type CalibrationConfidence = 'unverified' | 'single-sample' | 'multi-sample' | 'verified'
+
+/** 解码配置：内置基线（L0）与用户覆盖层（L1）共用同一结构。 */
+export interface CalibrationDecode {
+  status: 'calibrated' | 'uncalibrated' | 'disabled'
+  percentReportId: number
+  percentOffset: number | null
+  percentScale: number
+  percentRange: [number, number]
+  charging?: { offset: number; mask?: number; valueWhenCharging?: number } | null
+  /** 仅基线使用：通道本身不含电量字段时的说明。 */
+  unavailableReason?: string | null
+}
+
+export interface CalibrationSample {
+  /** 采样时厂商官方驱动显示的电量（0–100）。 */
+  reference: number
+  /** 原始报告 payload（hex，不含 Report ID）。 */
+  raw: string
+  reportId: number
+  capturedAt: number
+}
+
+/** 用户校准覆盖层条目（L1），只能覆盖 decode，不能改 match / transport。 */
+export interface CalibrationEntry {
+  probeId: string
+  serial?: string | null
+  decode: CalibrationDecode
+  confidence: CalibrationConfidence | ''
+  samples: CalibrationSample[]
+  calibratedAt: number
+  source?: string | null
+}
+
+export interface BatteryChannel {
+  probeId: string
+  vendor: string
+  displayName: string
+  vendorId: number | null
+  productIds: string[]
+  usagePage: string
+  usages: number[]
+  transportKind: string
+  reportIds: number[]
+  reportLengths: Record<string, number>
+  /** 当前机器上是否有匹配该探针的 HID 接口。 */
+  present: boolean
+  enabled: boolean
+  status: 'calibrated' | 'uncalibrated' | 'disabled'
+  channelAvailable: boolean
+  reason?: string | null
+  effectiveDecode: CalibrationDecode
+  calibratedBy: 'bundled' | 'user'
+  confidence?: CalibrationConfidence | null
+  calibratedAt?: number | null
+  samples: CalibrationSample[]
+}
+
+export interface ReportSamples {
+  reportId: number
+  length: number
+  samples: string[]
+  /** 多次采样完全相同：多半是事件触发型通道，需要先操作设备。 */
+  stable: boolean
+}
+
+export interface BatterySampleResult {
+  probeId: string
+  capturedAt: number
+  hidapiAvailable: boolean
+  interfaces: string[]
+  reports: ReportSamples[]
+  errors: string[]
+}
+
+export interface CalibrationState {
+  path: string
+  healthy: boolean
+  error?: string | null
+  entries: CalibrationEntry[]
+  channels: BatteryChannel[]
+}
+
+/** 未被任何探针匹配的厂商 HID 接口（只读扫描结果）。 */
+export interface UnmatchedInterface {
+  vendorId: number
+  productId: number
+  usagePage: number
+  usage: number
+  interface: number
+  manufacturer: string
+  product: string
+  reports: ReportSamples[]
+  pathHint: string
+}
+
 export interface PeripheralBackend {
   readonly mode: DataSource
   listDevices(): Promise<DeviceSnapshot[]>
@@ -205,4 +308,13 @@ export interface PeripheralBackend {
   onDevicesChanged(cb: (devices: DeviceSnapshot[]) => void): () => void
   onTelemetry(cb: (sample: TelemetrySample) => void): () => void
   simulateHotplug?(): Promise<{ type: 'connected' | 'disconnected'; deviceName: string }>
+  /** 电量校准：仅桌面端（tauri）实现；浏览器快照 / 演示模式不提供，界面据此降级。 */
+  batteryChannels?(): Promise<BatteryChannel[]>
+  batterySample?(probeId: string, times?: number): Promise<BatterySampleResult>
+  batteryCalibrationState?(): Promise<CalibrationState>
+  batteryCalibrationSave?(entry: CalibrationEntry): Promise<CalibrationState>
+  batteryCalibrationReset?(probeId: string, serial?: string | null): Promise<CalibrationState>
+  batteryCalibrationExport?(): Promise<string>
+  batteryCalibrationImport?(json: string): Promise<CalibrationState>
+  batteryScanUnmatched?(maxReportId?: number): Promise<UnmatchedInterface[]>
 }

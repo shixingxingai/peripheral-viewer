@@ -13,16 +13,29 @@
       "enabled": true,
       "match": {
         "vendorId": "260D",
-        "productIds": ["1092"],
+        "productIds": [
+          "1092"
+        ],
         "usagePage": "FF00",
-        "usages": [1],
+        "usages": [
+          1
+        ],
         "nameContains": []
       },
       "transport": {
         "kind": "input-report",
-        "reportIds": [4, 5],
-        "reportLengths": { "4": 24, "5": 24 },
-        "reportPathHints": { "4": "Col04", "5": "Col05" },
+        "reportIds": [
+          4,
+          5
+        ],
+        "reportLengths": {
+          "4": 24,
+          "5": 24
+        },
+        "reportPathHints": {
+          "4": "Col04",
+          "5": "Col05"
+        },
         "writeRequired": false,
         "note": "HID 描述符只有 Input（无 Output / Feature），属于被动上报型。用 HidD_GetInputReport 只读获取当前报告，不向设备写入任何字节。",
         "descriptorHex": "0600ff0901a10185050902150026ff00750895178100c0",
@@ -36,13 +49,24 @@
         "percentReportId": 5,
         "percentOffset": null,
         "percentScale": 1,
-        "percentRange": [0, 100],
+        "percentRange": [
+          0,
+          100
+        ],
         "charging": null,
-        "note": "尚未确认原始报告中哪个字节代表电量。请用厂商驱动配合 --capture / --suggest 校准后填写 percentOffset，再把 status 改为 calibrated。"
+        "note": "2026-11-08 复测结论：三条可读通道均无电量。① FF00 两个 collection 的 Input report 4 / 5，20 秒内 79 次读取完全静态，report 4 全 0，report 5 = aa 01 + ASCII 设备串；② iface 3（Consumer Control）唯一的 64 字节 Feature report 三次读取恒为 001601000300…；③ FF00 描述符只有 Input，无 Output / Feature，无法下发查询命令，也没有 0x85 电池用途页。因此不是「差一个字节没认出来」，而是通道本身不提供电量，保持不可用。",
+        "unavailableReason": "该接收器的 HID 通道不含电量字段（2026-11-08 实测：两路 vendor 报告 20 秒内 79 次读取完全静态，仅 vendor 报告 5 携带设备串；消费者接口 64 字节 Feature report 恒定），无法通过校准得到百分比。如需电量，请改用蓝牙模式或提供厂商协议抓包。"
       },
       "maintenance": {
-        "howToCalibrate": "打开厂商驱动读取真实电量 X%，运行 python scripts/battery_probe.py --capture --reference X；改变电量后再采一次，运行 --suggest 得到候选字节位置，把建议值填回 decode 并将 status 改为 calibrated。",
-        "lastVerifiedAt": null
+        "howToCalibrate": "当前 2.4G 通道无法校准。可行路径：① 键盘切到蓝牙模式，Windows 与项目可通过 GATT Battery Service (0x180F / 0x2A19) 读取，需新增 transport.kind = ble；② 用 USBPcap + Wireshark 记录厂商驱动读取电量时的USB 流量，若确认使用 SetReport 命令，则需先确认描述符中存在对应 Output / Feature report。",
+        "lastVerifiedAt": "2026-11-08",
+        "verdict": "no-readable-channel",
+        "checkedChannels": [
+          "FF00 Input report 4 / 5：静态，无 0x64，无电量字段",
+          "iface 3 Consumer Control Feature report (64B)：恒为 001601000300…",
+          "描述符：无 Output / Feature，无 Battery System Page 0x85",
+          "PnP：无 Battery 类设备，PowerData 不含剩余电量"
+        ]
       }
     },
     {
@@ -52,16 +76,33 @@
       "enabled": true,
       "match": {
         "vendorId": "24AE",
-        "productIds": ["185A"],
+        "productIds": [
+          "185A"
+        ],
         "usagePage": "FF00",
-        "usages": [2, 14],
+        "usages": [
+          2,
+          14
+        ],
         "nameContains": []
       },
       "transport": {
         "kind": "output-query",
-        "reportIds": [186, 187, 188],
-        "reportLengths": { "186": 32, "187": 7, "188": 12 },
-        "reportPathHints": { "186": "Col04", "187": "Col05", "188": "Col06" },
+        "reportIds": [
+          186,
+          187,
+          188
+        ],
+        "reportLengths": {
+          "186": 32,
+          "187": 7,
+          "188": 12
+        },
+        "reportPathHints": {
+          "186": "Col04",
+          "187": "Col05",
+          "188": "Col06"
+        },
         "writeRequired": true,
         "query": {
           "status": "uncalibrated",
@@ -82,7 +123,10 @@
         "percentReportId": 188,
         "percentOffset": 5,
         "percentScale": 1,
-        "percentRange": [0, 100],
+        "percentRange": [
+          0,
+          100
+        ],
         "charging": null,
         "note": "2026-11-07 单点校准：官方驱动显示 48% 时，Report 0xBC 偏移 5 的字节为 0x30(48)，与读数一致；Report 0xBB 同位置同值，采用 0xBC。电量变化后再采一次即可升级为多点验证。"
       },

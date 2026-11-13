@@ -83,6 +83,26 @@
   input::placeholder {
     color: var(--color-ink-faint);
   }
+
+  /*
+   * 原生下拉的展开面板由浏览器绘制，不跟随组件样式：
+   * 选中项文字是 text-ink（近白），面板却可能退回系统浅色底，就成了白底白字。
+   * 这里把 select 与 option 的配色钉死，避免整页深色里突然冒出一块浅色列表。
+   */
+  select {
+    color-scheme: dark;
+  }
+
+  option,
+  optgroup {
+    background-color: var(--color-panel);
+    color: var(--color-ink);
+  }
+
+  option:checked {
+    background-color: rgba(var(--accent-rgb), 0.2);
+    color: var(--color-ink);
+  }
 }
 
 @layer components {

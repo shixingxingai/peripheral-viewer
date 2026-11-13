@@ -6,7 +6,13 @@
 
 项目采用「浏览器前端 + 可替换数据源」的结构：同一套 UI 既能加载**本机真实扫描数据**，也能在桌面端由 **Rust 后端实时采集**，还能在没有设备的环境用**演示数据**运行。
 
-> 当前版本为 `0.2.0`。前端 6 个页面、真实设备采集、Tauri 桌面端与安装包均已可运行；厂商私有协议遥测、精确 glTF 资产库、SQLite 等仍属于后续规划，详见[已知限制](#已知限制与后续规划)。
+> 当前版本为 `0.3.1`。前端 6 个页面、真实设备采集、Tauri 桌面端与安装包均已可运行；厂商私有协议遥测、精确 glTF 资产库、SQLite 等仍属于后续规划，详见[已知限制](#已知限制与后续规划)。
+
+## 界面预览
+
+![3D 查看器：设备模型与右侧实时状态面板](./docs/images/viewer-3d.png)
+
+3D 查看器页面，左侧为设备列表与可视化画布，右侧是端口、连接状态与电源信息。
 
 ## 功能
 
@@ -122,7 +128,7 @@ npm run test:probe  # 电量探针规则单测（Python unittest）
 npm run build
 ```
 
-当前状态：lint 0 错误、typecheck 0 错误、20 个前端测试 + 17 个探针测试通过、生产构建通过。
+当前状态：lint 0 错误、typecheck 0 错误、36 个前端测试 + 42 个 Python 测试（设备分类 / 探针 / 校准覆盖层）+ 30 个 Rust 单测通过、生产构建通过。
 
 ## 厂商电量适配（Vendor battery probes）
 
@@ -143,10 +149,10 @@ npm run build
 
 | 厂商 | VID:PID | 方式 | 状态 |
 |---|---|---|---|
-| Dareu（达尔优） | `260D:1092` | `input-report`，Report ID 4 / 5，24 字节 | 通道已识别，**待校准** |
+| Dareu（达尔优） | `260D:1092` | `input-report`，Report ID 4 / 5，24 字节 | **无可读电量通道**（2026-11-08 实测） |
 | Rapoo（雷柏） | `24AE:185A` | `output-query`，Report ID 0xBA / 0xBB / 0xBC | **已校准**（单点）：Report 0xBC / 0xBB 偏移 5，scale 1 |
 
-「待校准」不等于不可用：原始字节已能稳定读取，只差确认「哪个字节是电量」。界面会显示「待校准」，不会编造百分比。
+达尔优这台是「通道里根本没有电量」，不是「差一个字节没认出来」。实测三条路径都排除了：两路 vendor Input report 在 20 秒内 79 次读取完全静态（report 4 全 0，report 5 是 `aa 01` + 设备串）；消费者接口唯一的 64 字节 Feature report 恒为 `001601000300…`；描述符里没有 Output / Feature，无法下发查询命令，也没有 `0x85` 电池用途页。因此界面显示「不可用」并给出原因，而不是「待校准」。
 
 Rapoo 的校准依据：官方驱动显示 48% 时原始报告为 `b0 42 80 0c 01 30`，末字节 `0x30` = 48；后续电量升到 54%、56% 时该字节同步变为 `0x36`、`0x38`，两个 collection 读数一致。仍建议电量明显变化后再采一次，把 `confidence` 从 `single-sample` 升级为 `multi-sample`。
 
@@ -172,6 +178,24 @@ npm run battery:suggest
 
 `--suggest` 会输出候选的 `percentOffset` / `percentScale`，填入对应探针的 `decode` 并把 `status` 改为 `calibrated`。**建议再用第三个电量值验证一次**，避免只凭两点拟合误判。
 
+### 校准覆盖层（运行时，不需重新编译）
+
+内置 `config/battery-probes.json` 是编译期嵌入的只读基线；用户的校准结果写在
+`%APPDATA%\peripheral-viewer\battery-calibration.json`，运行时合并、保存即生效：
+
+| 层 | 位置 | 谁写 |
+|---|---|---|
+| L0 基线 | `config/battery-probes.json` | 随版本发布（只读） |
+| L1 覆盖层 | `%APPDATA%\peripheral-viewer\battery-calibration.json` | 应用内校准 / 手工编辑 |
+
+- 覆盖层**只能改 `decode`**（解码方式），`match` / `transport` 永远以基线为准——用户改错也变不出写通道。
+- **序列号级校准**：同一探针可以针对具体设备单独校准（条目带 `serial`），优先生效；没有对应序列号时退回通用条目，同型号另一台不会被带偏。
+- 整份文件校验失败时**整份忽略**并回到基线，同时在设置页给出错误原因；改动前会留一份 `.bak`。设置页支持**导出 / 导入**校准文件。
+- 桌面端命令：`battery_channels` / `battery_sample` / `battery_calibration_state` / `battery_calibration_save` / `battery_calibration_reset` / `battery_calibration_export` / `battery_calibration_import` / `battery_scan_unmatched`。
+- `scripts/battery_probe.py` 读同一份覆盖层，保证浏览器快照与桌面端结论一致。
+
+> 界面内已有校准向导：设备详情抽屉里「待校准」下方点「电量校准」，或设置页「电量校准」区块点「打开校准向导」。流程为「选通道 → 填官方驱动显示的电量 → 只读采样（看字节表）→ 选候选 → 验证并保存」，保存后立即生效、可随时恢复内置。向导第 1 步还提供**未适配接口的只读扫描**，输出可直接提交的探针片段（默认 `enabled=false`，需随版本发布才生效）。设计见 [`docs/battery-calibration-plan.md`](docs/battery-calibration-plan.md)。
+
 ### 安全与诚实约定
 
 - **默认只读**：`defaults.allowDeviceWrites` 为 `false`；写操作还需命令行 `--allow-write` 且 `transport.query.status=calibrated`，三重门控。
@@ -189,7 +213,7 @@ npm run battery:suggest
 ## 已知限制与后续规划
 
 - 设备采集基于用户态 PnP 只读接口，**未接入内核驱动**；热插拔采用轮询 diff，而非 `CM_Register_Notification` 设备通知。
-- 厂商私有协议：已提供配置驱动的电量探针框架；雷柏已校准出电量，达尔优的私有通道已识别但**尚未校准**；HID++ / OpenRGB 等其余协议、真实遥测采样、精确 glTF 模型库与设备目录、SQLite 持久化与迁移仍未实现。3D 模型是按类别构造的参数化模型。
+- 厂商私有协议：已提供配置驱动的电量探针框架；雷柏已校准出电量，达尔优该接收器经实测**不提供可读电量通道**（详见上一节），如需读取需改用蓝牙 GATT 或提供厂商协议抓包；HID++ / OpenRGB 等其余协议、真实遥测采样、精确 glTF 模型库与设备目录、SQLite 持久化与迁移仍未实现。3D 模型是按类别构造的参数化模型。
 - 设备类别依赖 HID 用途信号；若 hidapi 不可用（缺少 Python `hidapi` 模块），组合接收器会退回「键盘优先」的名称启发式，可能再次误判。
 - 桌面端尚未做代码签名、自动更新与崩溃上报。
 - `elkjs` 约 1.44 MB，仅在打开拓扑页时按需加载，构建时仍会给出体积警告。

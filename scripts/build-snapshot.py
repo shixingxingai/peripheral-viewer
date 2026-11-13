@@ -381,15 +381,25 @@ def build_diagnostics(devices: list[dict], scanned_at: int) -> list[dict]:
 
     if pending:
         vendors = "、".join(sorted({device["batteryProbe"]["vendor"] for device in pending}))
+        # 原因由探针配置给出：可能是「待校准」，也可能是「通道不含电量字段」，两者不能混为一谈。
+        reasons = sorted({
+            (device["batteryProbe"].get("reason") or "").strip()
+            for device in pending
+            if (device["batteryProbe"].get("reason") or "").strip()
+        })
+        detail = f"{len(pending)} 台设备（{vendors}）暂不显示电量。"
+        if reasons:
+            detail += reasons[0] if len(reasons) == 1 else "；".join(reasons)
         result.append(
             {
-                "id": "diag-battery-uncalibrated",
+                "id": "diag-battery-unavailable",
                 "severity": "info",
                 "scope": "system",
-                "title": "电量通道已识别，待校准",
-                "detail": f"{len(pending)} 台设备（{vendors}）的厂商私有电量通道已识别，但协议尚未校准，因此暂不显示电量。",
-                "suggestion": "运行 python scripts/battery_probe.py --capture --reference <厂商驱动显示的电量> 采样，"
-                              "换电量后再采一次并用 --suggest 生成解码建议。",
+                "title": "电量不可用",
+                "detail": detail,
+                "suggestion": "若设备确实上报电量：运行 python scripts/battery_probe.py --capture --reference "
+                              "<厂商驱动显示的电量> 采样，换电量后再采一次并用 --suggest 生成解码建议。"
+                              "若原因是通道不含电量字段，则需改用蓝牙 GATT 或提供厂商协议抓包。",
                 "createdAt": scanned_at,
             }
         )

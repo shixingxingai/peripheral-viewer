@@ -5,6 +5,7 @@ import {
   Cpu,
   Database,
   Download,
+  FlaskConical,
   Gauge,
   HardDrive,
   Info,
@@ -18,8 +19,9 @@ import {
   Sparkles,
   Terminal,
   TriangleAlert,
+  Upload,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { LogoMark } from '@/components/common/Logo'
 import { PageHeader } from '@/components/common/PageHeader'
@@ -29,6 +31,7 @@ import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { Segmented } from '@/components/ui/segmented'
 import { Switch } from '@/components/ui/switch'
+import { CalibrationWizard } from '@/features/calibration/CalibrationWizard'
 import { useDataSource } from '@/hooks/useDataSource'
 import { backend, demoBackend, loadRealSnapshot, switchToDemoData } from '@/lib/backend'
 import {
@@ -47,6 +50,7 @@ import {
   useSettingsStore,
 } from '@/stores/settings'
 import { useUiStore } from '@/stores/ui'
+import type { CalibrationState } from '@/types/device'
 
 const ACCENTS: Array<{ value: Accent; color: string; color2: string; labelKey: string }> = [
   {
@@ -125,6 +129,78 @@ export function SettingsPage() {
   const [exporting, setExporting] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [scanning, setScanning] = useState(false)
+  const [calibrationOpen, setCalibrationOpen] = useState(false)
+  const [calibration, setCalibration] = useState<CalibrationState | null>(null)
+  const importRef = useRef<HTMLInputElement>(null)
+  const canCalibrate = typeof backend.batteryCalibrationState === 'function'
+  const channels = calibration?.channels ?? []
+  const calibrationEntries = calibration?.entries ?? []
+
+  // 只在桌面端拉取通道清单；向导开关时重新拉一次，保证校准后状态同步。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: calibrationOpen 只作为「重新拉取」的触发器，不参与请求
+  useEffect(() => {
+    if (!canCalibrate) return
+    let alive = true
+    backend
+      .batteryCalibrationState?.()
+      .then((next) => {
+        if (alive) setCalibration(next)
+      })
+      .catch(() => {
+        if (alive) setCalibration(null)
+      })
+    return () => {
+      alive = false
+    }
+  }, [canCalibrate, calibrationOpen])
+
+  const resetCalibration = async (probeId: string, serial: string | null) => {
+    if (!backend.batteryCalibrationReset) return
+    try {
+      const next = await backend.batteryCalibrationReset(probeId, serial)
+      setCalibration(next)
+      pushToast({ title: t('calibration.resetDone'), variant: 'success' })
+    } catch (error) {
+      pushToast({
+        title: t('calibration.errors.save'),
+        description: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      })
+    }
+  }
+
+  const exportCalibration = async () => {
+    if (!backend.batteryCalibrationExport) return
+    try {
+      const json = await backend.batteryCalibrationExport()
+      downloadBlob(
+        `periphery-calibration-${new Date().toISOString().slice(0, 10)}.json`,
+        new Blob([json], { type: 'application/json' }),
+      )
+      pushToast({ title: t('calibration.settings.exportDone'), variant: 'success' })
+    } catch (error) {
+      pushToast({
+        title: t('calibration.errors.save'),
+        description: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      })
+    }
+  }
+
+  const importCalibration = async (file: File) => {
+    if (!backend.batteryCalibrationImport) return
+    try {
+      const next = await backend.batteryCalibrationImport(await file.text())
+      setCalibration(next)
+      pushToast({ title: t('calibration.settings.importDone'), variant: 'success' })
+    } catch (error) {
+      pushToast({
+        title: t('calibration.settings.importFailed'),
+        description: error instanceof Error ? error.message : String(error),
+        variant: 'error',
+      })
+    }
+  }
 
   const { source, meta } = useDataSource()
   const isTauri = source === 'tauri'
@@ -443,6 +519,169 @@ export function SettingsPage() {
             </div>
           </SectionCard>
 
+          <SectionCard title={t('calibration.settings.title')} bodyClassName="p-4">
+            <div className="flex flex-wrap items-start gap-2">
+              <div className="min-w-0 flex-1">
+                <p className="text-[10px] leading-relaxed text-ink-faint">
+                  {canCalibrate ? t('calibration.settings.hint') : t('calibration.desktopOnly')}
+                </p>
+              </div>
+              <Button
+                variant="soft"
+                size="sm"
+                icon={<FlaskConical className="h-3 w-3" />}
+                onClick={() => setCalibrationOpen(true)}
+                disabled={!canCalibrate}
+              >
+                {t('calibration.settings.open')}
+              </Button>
+            </div>
+
+            {canCalibrate ? (
+              channels.length === 0 ? (
+                <p className="mt-3 rounded-lg border border-dashed border-line px-3 py-4 text-center text-[9.5px] text-ink-faint">
+                  {t('calibration.settings.none')}
+                </p>
+              ) : (
+                <div className="mt-3 space-y-1">
+                  {channels.map((channel) => (
+                    <div
+                      key={channel.probeId}
+                      className="flex flex-wrap items-center gap-2 border-b border-white/[0.045] py-2 last:border-0"
+                    >
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[10px] text-ink">
+                          {channel.displayName || channel.vendor}
+                        </span>
+                        <span className="mt-0.5 block font-mono text-[8.5px] text-ink-faint/70">
+                          {channel.vendorId === null
+                            ? '—'
+                            : channel.vendorId.toString(16).toUpperCase().padStart(4, '0')}
+                          :{channel.productIds.join('/')} · {channel.transportKind}
+                        </span>
+                      </span>
+                      {!channel.present ? (
+                        <Badge variant="neutral" size="sm">
+                          {t('calibration.channel.absent')}
+                        </Badge>
+                      ) : null}
+                      <Badge
+                        variant={
+                          channel.status === 'calibrated'
+                            ? 'success'
+                            : channel.channelAvailable
+                              ? 'warning'
+                              : 'neutral'
+                        }
+                        size="sm"
+                      >
+                        {channel.status === 'calibrated'
+                          ? channel.calibratedBy === 'user'
+                            ? t('calibration.channel.userCalibrated')
+                            : t('calibration.channel.bundledCalibrated')
+                          : channel.channelAvailable
+                            ? t('calibration.channel.uncalibrated')
+                            : t('connection.batteryUnavailable')}
+                      </Badge>
+                      {channel.confidence ? (
+                        <Badge variant="outline" size="sm">
+                          {t(`calibration.confidence.${channel.confidence}`)}
+                        </Badge>
+                      ) : null}
+                      {channel.calibratedBy === 'user' ? (
+                        <Button
+                          variant="ghost"
+                          size="xs"
+                          icon={<RotateCcw className="h-3 w-3" />}
+                          onClick={() => void resetCalibration(channel.probeId, null)}
+                        >
+                          {t('calibration.resetToBundled')}
+                        </Button>
+                      ) : null}
+                    </div>
+                  ))}
+                </div>
+              )
+            ) : null}
+
+            {canCalibrate && calibrationEntries.length > 0 ? (
+              <div className="mt-3">
+                <p className="mb-1 text-[9px] font-semibold uppercase tracking-[0.18em] text-ink-faint">
+                  {t('calibration.settings.userEntries')}
+                </p>
+                {calibrationEntries.map((entry) => (
+                  <div
+                    key={`${entry.probeId}:${entry.serial ?? ''}`}
+                    className="flex flex-wrap items-center gap-2 border-b border-white/[0.045] py-2 last:border-0"
+                  >
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate font-mono text-[9.5px] text-ink-muted">
+                        {entry.probeId}
+                      </span>
+                      <span className="mt-0.5 block font-mono text-[8.5px] text-ink-faint/70">
+                        Report {entry.decode.percentReportId} · offset {entry.decode.percentOffset}{' '}
+                        · ×{entry.decode.percentScale}
+                      </span>
+                    </span>
+                    <Badge variant={entry.serial ? 'accent' : 'outline'} size="sm">
+                      {entry.serial
+                        ? t('calibration.settings.deviceScoped', { serial: entry.serial })
+                        : t('calibration.settings.allDevices')}
+                    </Badge>
+                    {entry.confidence ? (
+                      <Badge variant="outline" size="sm">
+                        {t(`calibration.confidence.${entry.confidence}`)}
+                      </Badge>
+                    ) : null}
+                    <Button
+                      variant="ghost"
+                      size="xs"
+                      icon={<RotateCcw className="h-3 w-3" />}
+                      onClick={() => void resetCalibration(entry.probeId, entry.serial ?? null)}
+                    >
+                      {t('calibration.resetToBundled')}
+                    </Button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+
+            {canCalibrate ? (
+              <div className="mt-3 flex flex-wrap items-center gap-2">
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<Download className="h-3 w-3" />}
+                  onClick={() => void exportCalibration()}
+                >
+                  {t('calibration.settings.export')}
+                </Button>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  icon={<Upload className="h-3 w-3" />}
+                  onClick={() => importRef.current?.click()}
+                >
+                  {t('calibration.settings.import')}
+                </Button>
+                <input
+                  ref={importRef}
+                  type="file"
+                  accept="application/json,.json"
+                  className="hidden"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0]
+                    event.target.value = ''
+                    if (file) void importCalibration(file)
+                  }}
+                />
+                <span className="ml-auto max-w-[46%] truncate font-mono text-[8px] text-ink-faint/50">
+                  {calibration?.path}
+                </span>
+              </div>
+            ) : null}
+          </SectionCard>
+
           <SectionCard title={t('settings.notifications.title')} bodyClassName="p-4">
             <SettingRow
               icon={Bell}
@@ -488,7 +727,7 @@ export function SettingsPage() {
             <div className="mt-3 grid grid-cols-1 gap-1.5 sm:grid-cols-2">
               <div className="rounded-lg border border-white/[0.05] bg-white/[0.014] px-2.5 py-2">
                 <p className="text-[8.5px] text-ink-faint">{t('settings.about.version')}</p>
-                <p className="mt-0.5 font-mono text-[10px] text-ink-muted">0.2.0 · MVP</p>
+                <p className="mt-0.5 font-mono text-[10px] text-ink-muted">0.3.1 · MVP</p>
               </div>
               <div className="rounded-lg border border-white/[0.05] bg-white/[0.014] px-2.5 py-2">
                 <p className="text-[8.5px] text-ink-faint">{t('settings.about.stack')}</p>
@@ -651,6 +890,8 @@ export function SettingsPage() {
           </div>
         </aside>
       </div>
+
+      <CalibrationWizard open={calibrationOpen} onOpenChange={setCalibrationOpen} />
     </div>
   )
 }

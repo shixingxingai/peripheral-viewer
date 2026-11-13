@@ -187,7 +187,7 @@ export function ViewerPage() {
               value={device.id}
               onChange={(event) => select(event.target.value)}
               aria-label={t('viewer.selectDevice')}
-              className="h-9 max-w-[300px] appearance-none truncate rounded-lg border border-line bg-white/[0.025] pl-8 pr-8 text-[11px] text-ink outline-none transition-colors hover:border-line-strong focus:border-[rgba(var(--accent-rgb),0.4)]"
+              className="h-9 max-w-[300px] appearance-none truncate rounded-lg border border-line bg-panel pl-8 pr-8 text-[11px] text-ink outline-none transition-colors hover:border-line-strong focus:border-[rgba(var(--accent-rgb),0.4)]"
             >
               {categories.map((category) => (
                 <optgroup key={category} label={t(`category.${category}`)}>

@@ -57,18 +57,29 @@ fn replace_devices(state: &AppState, devices: Vec<DeviceSnapshot>) {
     *state.devices.lock().unwrap() = devices;
 }
 
-/// 纯计算：比较新旧列表，判断集合或状态是否变化，不持有任何锁。
+/// 纯计算：比较新旧列表，判断集合、状态或电量是否变化，不持有任何锁。
+///
+/// 电量必须参与比较：否则校准保存后即使读出新的百分比，前端也收不到推送，
+/// 用户会以为「保存了但没生效」。
 fn has_changes(current: &[DeviceSnapshot], next: &[DeviceSnapshot]) -> bool {
-    let previous: HashMap<String, String> = current
+    fn signature(device: &DeviceSnapshot) -> (String, Option<u8>, String, bool) {
+        let probe = device.battery_probe.as_ref();
+        (
+            device.status.clone(),
+            device.battery,
+            probe.map(|item| item.status.clone()).unwrap_or_default(),
+            probe.map(|item| item.channel_available).unwrap_or(true),
+        )
+    }
+
+    let previous: HashMap<String, (String, Option<u8>, String, bool)> = current
         .iter()
-        .map(|device| (device.id.clone(), device.status.clone()))
+        .map(|device| (device.id.clone(), signature(device)))
         .collect();
     current.len() != next.len()
-        || next.iter().any(|device| {
-            previous
-                .get(&device.id)
-                .map_or(true, |status| *status != device.status)
-        })
+        || next
+            .iter()
+            .any(|device| previous.get(&device.id).map_or(true, |old| *old != signature(device)))
 }
 
 /// 纯计算：依据 diff 结果生成待入队事件；不持有任何锁。
@@ -239,6 +250,119 @@ fn load_layout(state: State<'_, Arc<AppState>>) -> Option<DeskLayout> {
     layout_store::load(&state.layout_path)
 }
 
+// ---------------------------------------------------------------------------
+// 电量校准：运行时覆盖层（L1）+ 只读采样
+//
+// 全部只读：这里没有向设备写入的入口。校准只改解码配置，不改 transport。
+// ---------------------------------------------------------------------------
+
+/// 校准保存后立刻重新枚举并推送：用户点了保存就应该马上看到新值。
+///
+/// 枚举会拉起 PowerShell（可能数百毫秒到数秒），所以放进 blocking 线程池，
+/// 不占用 IPC 的主线程。
+async fn refresh_after_calibration(app: &tauri::AppHandle, state: Arc<AppState>) {
+    let handle = app.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || match state.provider.enumerate() {
+        Ok(devices) => {
+            if !apply_devices(&state, &handle, devices) {
+                // 电量和状态都没变化时 apply_devices 不会推送，但校准来源可能变了，
+                // 这里补一次全量推送，保证界面上的「待校准 / 已校准」同步。
+                emit_devices_changed(&handle, snapshot_devices(&state));
+            }
+        }
+        Err(error) => tracing::warn!("校准后刷新设备失败: {:#}", error),
+    })
+    .await;
+}
+
+/// 通道清单：设置页总览与向导第 1 步共用。
+#[tauri::command]
+async fn battery_channels() -> Result<Vec<battery::BatteryChannel>, String> {
+    tauri::async_runtime::spawn_blocking(battery::channels)
+        .await
+        .map_err(|error| format!("枚举电量通道失败: {error}"))
+}
+
+/// 只读采样：连续读取 n 次（默认 3 次），用于判断通道是静态还是动态。
+#[tauri::command]
+async fn battery_sample(
+    probe_id: String,
+    times: Option<u8>,
+) -> Result<battery::BatterySampleResult, String> {
+    let times = times.unwrap_or(3);
+    tauri::async_runtime::spawn_blocking(move || battery::sample(&probe_id, times))
+        .await
+        .map_err(|error| format!("采样任务失败: {error}"))?
+}
+
+#[tauri::command]
+async fn battery_calibration_state() -> Result<battery::CalibrationState, String> {
+    tauri::async_runtime::spawn_blocking(battery::calibration_state)
+        .await
+        .map_err(|error| format!("读取校准状态失败: {error}"))
+}
+
+#[tauri::command]
+async fn battery_calibration_save(
+    entry: battery::OverlayEntry,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<battery::CalibrationState, String> {
+    let shared: Arc<AppState> = state.inner().clone();
+    let next = tauri::async_runtime::spawn_blocking(move || battery::save_calibration(entry))
+        .await
+        .map_err(|error| format!("保存任务失败: {error}"))??;
+    refresh_after_calibration(&app, shared).await;
+    Ok(next)
+}
+
+#[tauri::command]
+async fn battery_calibration_reset(
+    probe_id: String,
+    serial: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<battery::CalibrationState, String> {
+    let shared: Arc<AppState> = state.inner().clone();
+    let next = tauri::async_runtime::spawn_blocking(move || {
+        battery::reset_calibration(&probe_id, serial.as_deref())
+    })
+    .await
+    .map_err(|error| format!("重置任务失败: {error}"))??;
+    refresh_after_calibration(&app, shared).await;
+    Ok(next)
+}
+
+#[tauri::command]
+fn battery_calibration_export() -> Result<String, String> {
+    battery::export_calibration()
+}
+
+/// 只读扫描：找出没有被任何探针匹配的厂商接口，供「适配新厂商」使用。
+#[tauri::command]
+async fn battery_scan_unmatched(
+    max_report_id: Option<u8>,
+) -> Result<Vec<battery::UnmatchedInterface>, String> {
+    let upper = max_report_id.unwrap_or(8);
+    tauri::async_runtime::spawn_blocking(move || battery::scan_unmatched(upper))
+        .await
+        .map_err(|error| format!("扫描未适配接口失败: {error}"))?
+}
+
+#[tauri::command]
+async fn battery_calibration_import(
+    json: String,
+    app: tauri::AppHandle,
+    state: State<'_, Arc<AppState>>,
+) -> Result<battery::CalibrationState, String> {
+    let shared: Arc<AppState> = state.inner().clone();
+    let next = tauri::async_runtime::spawn_blocking(move || battery::import_calibration(&json))
+        .await
+        .map_err(|error| format!("导入任务失败: {error}"))??;
+    refresh_after_calibration(&app, shared).await;
+    Ok(next)
+}
+
 pub fn run() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -252,6 +376,9 @@ pub fn run() {
     tauri::Builder::default()
         .manage(state.clone())
         .setup(|app| {
+            // 预热用户校准覆盖层：启动即确定「用的是内置基线还是用户校准」，
+            // 避免首帧拿着默认值再纠正。
+            battery::init();
             let shared = app.state::<Arc<AppState>>().inner().clone();
             start_watcher(app.handle().clone(), shared);
             Ok(())
@@ -264,7 +391,15 @@ pub fn run() {
             get_events,
             get_telemetry_history,
             save_layout,
-            load_layout
+            load_layout,
+            battery_channels,
+            battery_sample,
+            battery_calibration_state,
+            battery_calibration_save,
+            battery_calibration_reset,
+            battery_calibration_export,
+            battery_calibration_import,
+            battery_scan_unmatched
         ])
         .run(tauri::generate_context!())
         .expect("运行 Tauri 应用失败");

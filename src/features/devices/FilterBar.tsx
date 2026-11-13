@@ -85,7 +85,7 @@ export function FilterBar({ devices }: { devices: DeviceSnapshot[] }) {
             <select
               value={sort}
               onChange={(event) => setSort(event.target.value as typeof sort)}
-              className="h-8 appearance-none rounded-lg border border-line bg-black/20 pl-7 pr-7 text-[10.5px] text-ink-muted outline-none transition-colors hover:border-line-strong focus:border-[rgba(var(--accent-rgb),0.4)]"
+              className="h-8 appearance-none rounded-lg border border-line bg-panel pl-7 pr-7 text-[10.5px] text-ink-muted outline-none transition-colors hover:border-line-strong focus:border-[rgba(var(--accent-rgb),0.4)]"
               aria-label={t('overview.sort.label')}
             >
               <option value="recent">{t('overview.sort.recent')}</option>

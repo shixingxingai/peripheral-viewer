@@ -6,7 +6,13 @@ A Windows desktop viewer for **computer peripherals**: it turns the devices actu
 
 The UI is built around a replaceable data source, so the same screens can display **real hardware scans**, be driven by a **Rust backend in the desktop app**, or fall back to **demo data** when no devices are available.
 
-> Current version: `0.2.0`. All six pages, real device scanning, the Tauri desktop app and its installer are runnable. Vendor-specific telemetry, a precise glTF asset library and SQLite persistence are still on the roadmap — see [Known limitations](#known-limitations-and-roadmap).
+> Current version: `0.3.1`. All six pages, real device scanning, the Tauri desktop app and its installer are runnable. Vendor-specific telemetry, a precise glTF asset library and SQLite persistence are still on the roadmap — see [Known limitations](#known-limitations-and-roadmap).
+
+## Preview
+
+![3D viewer: device model with the live status panel on the right](./docs/images/viewer-3d.png)
+
+The 3D viewer: device list and canvas on the left, ports, connection state and power details on the right.
 
 ## Features
 
@@ -143,10 +149,10 @@ Battery level on 2.4 GHz peripherals travels over a vendor-private HID report. W
 
 | Vendor | VID:PID | Strategy | Status |
 |---|---|---|---|
-| Dareu | `260D:1092` | `input-report`, Report ID 4 / 5, 24 bytes | Channel detected, **pending calibration** |
+| Dareu | `260D:1092` | `input-report`, Report ID 4 / 5, 24 bytes | **No readable battery channel** (measured 2026-11-08) |
 | Rapoo | `24AE:185A` | `output-query`, Report ID 0xBA / 0xBB / 0xBC | **Calibrated** (single sample): Report 0xBC / 0xBB, offset 5, scale 1 |
 
-"Pending calibration" does not mean unavailable: raw bytes are already read reliably, only the "which byte is the level" step is missing. The UI says so instead of inventing a percentage.
+Dareu is "the channel has no battery field", not "one byte left to identify". Three paths were ruled out by measurement: both vendor Input reports stayed completely static across 79 reads in 20 seconds (report 4 is all zeros, report 5 is `aa 01` plus a device string); the only 64-byte Feature report on the consumer-control interface is constantly `001601000300…`; and the descriptors expose no Output / Feature reports, so no query can be sent, with no `0x85` Battery System Page either. The UI therefore says "unavailable" with the reason instead of "pending calibration".
 
 Rapoo evidence: with the vendor driver reporting 48%, the raw report was `b0 42 80 0c 01 30` and the last byte `0x30` is 48; when the level rose to 54% and 56% that byte became `0x36` and `0x38`, with both collections agreeing. Capture once more at a clearly different level to upgrade `confidence` from `single-sample` to `multi-sample`.
 
@@ -189,7 +195,7 @@ npm run battery:suggest
 ## Known limitations and roadmap
 
 - Discovery relies on user-mode, read-only PnP interfaces — **no kernel driver**. Hot-plug detection uses polling diffs rather than `CM_Register_Notification`.
-- Vendor protocols: a config-driven battery-probe framework exists; Rapoo's level is already calibrated while Dareu's private channel is detected but **not calibrated yet**. HID++ / OpenRGB and other protocols, real telemetry sampling, a precise glTF model library and device catalogue, and SQLite persistence/migrations are still unimplemented. 3D models are parametric models built per device category.
+- Vendor protocols: a config-driven battery-probe framework exists; Rapoo's level is already calibrated, while the Dareu receiver was measured to expose **no readable battery channel** (see the previous section) — reading it would need BLE GATT or a vendor protocol capture. HID++ / OpenRGB and other protocols, real telemetry sampling, a precise glTF model library and device catalogue, and SQLite persistence/migrations are still unimplemented. 3D models are parametric models built per device category.
 - Device categories rely on HID usage signals; without hidapi (Python `hidapi` module missing) combo receivers fall back to the keyboard-first name heuristic and may be misclassified again.
 - The desktop build is not code-signed and has no auto-update or crash reporting.
 - `elkjs` is ~1.44 MB and only loads when the topology page opens, but Vite still reports a chunk-size warning.
